@@ -10,6 +10,7 @@ import (
 	"code.google.com/p/winsvc/eventlog"
 	"code.google.com/p/winsvc/mgr"
 	"code.google.com/p/winsvc/svc"
+	"github.com/StackExchange/scollector/collectors"
 	"github.com/StackExchange/slog"
 )
 
@@ -20,6 +21,9 @@ func init() {
 }
 
 func win_service_main() {
+	if *enableWmi {
+		return
+	}
 	const svcName = "scollector"
 	var err error
 	switch *win_service_command {
@@ -31,7 +35,7 @@ func win_service_main() {
 		err = startService(svcName)
 	case "stop":
 		err = controlService(svcName, svc.Stop, svc.Stopped)
-	default:
+	case "":
 		isIntSess, err := svc.IsAnInteractiveSession()
 		if err != nil {
 			slog.Fatalf("failed to determine if we are running in an interactive session: %v", err)
@@ -40,6 +44,8 @@ func win_service_main() {
 			go runService(svcName, false)
 		}
 		return
+	default:
+		slog.Fatalf("unknown winsvc command: %v", *win_service_command)
 	}
 	if err != nil {
 		slog.Fatalf("failed to %s %s: %v", *win_service_command, svcName, err)
@@ -114,7 +120,7 @@ func startService(name string) error {
 		return fmt.Errorf("could not access service: %v", err)
 	}
 	defer s.Close()
-	err = s.Start([]string{"p1", "p2", "p3"})
+	err = s.Start(nil)
 	if err != nil {
 		return fmt.Errorf("could not start service: %v", err)
 	}
@@ -155,21 +161,17 @@ type s struct{}
 func (m *s) Execute(args []string, r <-chan svc.ChangeRequest, changes chan<- svc.Status) (ssec bool, errno uint32) {
 	const cmdsAccepted = svc.AcceptStop | svc.AcceptShutdown
 	changes <- svc.Status{State: svc.StartPending}
-	tick := time.Tick(2 * time.Second)
 	changes <- svc.Status{State: svc.Running, Accepts: cmdsAccepted}
-	for {
-		select {
-		case <-tick:
-			fmt.Println("foo")
-		case c := <-r:
-			switch c.Cmd {
-			case svc.Interrogate:
-				changes <- c.CurrentStatus
-			case svc.Stop, svc.Shutdown:
-				os.Exit(0)
-			default:
-				slog.Errorf("unexpected control request #%d", c)
-			}
+loop:
+	for c := range r {
+		switch c.Cmd {
+		case svc.Interrogate:
+			changes <- c.CurrentStatus
+		case svc.Stop, svc.Shutdown:
+			collectors.KillWMI()
+			break loop
+		default:
+			slog.Errorf("unexpected control request #%d", c)
 		}
 	}
 	changes <- svc.Status{State: svc.StopPending}

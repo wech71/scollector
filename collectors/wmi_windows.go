@@ -10,7 +10,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/StackExchange/scollector/opentsdb"
 	"github.com/StackExchange/scollector/collect"
 	"github.com/StackExchange/slog"
 	"github.com/StackExchange/wmi"
@@ -30,12 +29,20 @@ func queryWmi(query string, dst interface{}) error {
 	return queryWmiNamespace(query, dst, "")
 }
 
+func KillWMI() {
+	if err := wmiCmd.Process.Kill(); err != nil {
+		slog.Infoln(err)
+	}
+	wmiCmd = nil
+	wmiCount = 0
+}
+
 func queryWmiNamespace(query string, dst interface{}, namespace string) (err error) {
 	wmiLock.Lock()
 	defer wmiLock.Unlock()
-	collect.Add("wmi.queries", opentsdb.TagSet{}, 1)
+	collect.Add("wmi.queries", nil, 1)
 	if wmiCount == 0 || wmiCmd == nil {
-		collect.Add("wmi.exec", opentsdb.TagSet{}, 1)
+		collect.Add("wmi.exec", nil, 1)
 		wmiCmd = exec.Command(os.Args[0], "-w")
 		if wmiIn != nil {
 			wmiIn.Close()
@@ -60,11 +67,7 @@ func queryWmiNamespace(query string, dst interface{}, namespace string) (err err
 	wmiCount++
 	defer func() {
 		if wmiCount > 50 {
-			if err := wmiCmd.Process.Kill(); err != nil {
-				slog.Infoln(err)
-			}
-			wmiCmd = nil
-			wmiCount = 0
+			KillWMI()
 		}
 	}()
 
@@ -95,4 +98,22 @@ func queryWmiNamespace(query string, dst interface{}, namespace string) (err err
 		err = fmt.Errorf("wmi query timeout")
 	}
 	return
+}
+
+func wmiInit(enable *bool, lock *sync.Mutex, dst interface{}, where string, query *string) func() {
+	*query = wmi.CreateQuery(dst, where)
+	return func() {
+		update := func() {
+			err := queryWmi(*query, &dst)
+			lock.Lock()
+			*enable = err == nil
+			lock.Unlock()
+		}
+		update()
+		go func() {
+			for _ = range time.Tick(time.Minute * 5) {
+				update()
+			}
+		}()
+	}
 }
